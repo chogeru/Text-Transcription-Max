@@ -239,7 +239,7 @@
                 <span style="font-size:11px; font-weight:800; color:#FF3B30; letter-spacing:0.5px;">REC DATA</span>
                 <span style="font-size:10px; color:#888;">音声再生</span>
             </div>
-            <audio id="audioPlayer" controls></audio>
+            <audio id="audioPlayer" controls playsinline></audio>
             <a id="downloadLink" style="font-size:12px; color:#0071E3; font-weight:700; text-decoration:none; padding:8px 14px; background:rgba(0,113,227,0.1); border-radius:10px; transition:0.2s;">保存</a>
         </div>
     </div>
@@ -283,7 +283,7 @@
         <h2 style="margin-top:0; font-size:22px;">⚙️ 設定</h2>
         <p style="font-size:14px; color:#666; line-height:1.6; margin-bottom:15px;">
             Google AI StudioのAPIキーを入力してください。<br>
-            <span style="font-size:12px; opacity:0.7;">保存時に、あなたのキーで利用可能な最適なモデルを自動で設定します。</span>
+            <span style="font-size:12px; opacity:0.7;">保存時に、あなたのキーで利用可能な安定版モデルを自動設定します。</span>
         </p>
         
         <a href="https://aistudio.google.com/app/apikey" target="_blank" class="api-link-btn">
@@ -333,6 +333,7 @@
     let mediaRecorder;
     let audioChunks = [];
     let isRecording = false;
+    let recordingMimeType = ''; // 録音フォーマット保持用
 
     function init() {
         if (localStorage.getItem(STORAGE_KEY_HTML)) {
@@ -406,34 +407,59 @@
         }
     }
 
-    /* --- Audio Recording --- */
+    /* --- Audio Recording (Mobile Compatible Fix) --- */
+    function getSupportedMimeType() {
+        const types = [
+            'audio/mp4', // iOS prefer
+            'audio/webm;codecs=opus', // Chrome prefer
+            'audio/webm',
+            'audio/ogg'
+        ];
+        for (const type of types) {
+            if (MediaRecorder.isTypeSupported(type)) return type;
+        }
+        return ''; // Default (browser choice)
+    }
+
     async function startAudioRecording() {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
+            
+            // スマホ対応: MIMEタイプの自動選択
+            recordingMimeType = getSupportedMimeType();
+            const options = recordingMimeType ? { mimeType: recordingMimeType } : undefined;
+            
+            mediaRecorder = new MediaRecorder(stream, options);
             audioChunks = [];
             
-            mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+            mediaRecorder.ondataavailable = event => {
+                if(event.data.size > 0) audioChunks.push(event.data);
+            };
             
             mediaRecorder.onstop = () => {
-                const blob = new Blob(audioChunks, { type: 'audio/webm' });
+                const blob = new Blob(audioChunks, { type: recordingMimeType || 'audio/webm' });
                 const url = URL.createObjectURL(blob);
                 
                 audioPlayer.src = url;
                 audioPlayerContainer.style.display = "flex";
                 mainScroll.scrollTo({ top: mainScroll.scrollHeight, behavior: 'smooth' });
 
+                // 拡張子判定
+                let ext = 'webm';
+                if(recordingMimeType.includes('mp4')) ext = 'mp4';
+                if(recordingMimeType.includes('ogg')) ext = 'ogg';
+
                 const timestamp = new Date().toISOString().slice(0,16).replace('T','_').replace(':','');
                 downloadLink.href = url;
-                downloadLink.download = `Max_Rec_${timestamp}.webm`;
+                downloadLink.download = `Max_Rec_${timestamp}.${ext}`;
                 
                 stream.getTracks().forEach(track => track.stop());
             };
             
             mediaRecorder.start();
         } catch (e) {
-            console.error("マイクエラー:", e);
-            alert("マイクへのアクセスが拒否されました。文字起こし機能のみ動作します。");
+            console.error("録音エラー:", e);
+            alert("録音に失敗しました。\n・サイトがSSL(https)化されているか確認してください\n・ブラウザのマイク権限を許可してください\n・文字起こし機能のみ継続します");
         }
     }
 
@@ -494,6 +520,7 @@
         }
     }
 
+    /* --- 修正: モデル選択ロジック（実験版/エイリアス切れ対応） --- */
     async function saveSettings() {
         const key = apiKeyInput.value.trim();
         const log = document.getElementById('modelStatus');
@@ -517,8 +544,36 @@
 
             if(availableModels.length === 0) throw new Error("利用可能なモデルがありません");
 
-            let selectedModel = availableModels.find(m => m.name.includes("gemini-1.5-flash"));
-            if (!selectedModel) selectedModel = availableModels.find(m => m.name.includes("gemini-1.5-pro"));
+            // --- 優先度ロジック: 具体的なバージョンを優先する ---
+            // エイリアス(gemini-1.5-flash)が効かない場合があるので、具体的なlatest/001等を優先
+            let selectedModel = null;
+            
+            const priorityPatterns = [
+                'gemini-1.5-flash-latest', 
+                'gemini-1.5-flash-001',
+                'gemini-1.5-flash',
+                'gemini-1.5-pro-latest',
+                'gemini-1.5-pro-001',
+                'gemini-1.5-pro'
+            ];
+
+            // exp(実験版)は除外して検索
+            for (const pattern of priorityPatterns) {
+                selectedModel = availableModels.find(m => m.name.endsWith(pattern));
+                if (selectedModel) break;
+            }
+
+            // 見つからない場合、'flash' を含む安定版を探す
+            if (!selectedModel) {
+                selectedModel = availableModels.find(m => m.name.includes("flash") && !m.name.includes("exp"));
+            }
+            
+            // それでもなければ、リストの最初（実験版以外）
+            if (!selectedModel) {
+                selectedModel = availableModels.find(m => !m.name.includes("exp"));
+            }
+            
+            // どうしてもなければリストの最初
             if (!selectedModel) selectedModel = availableModels[0];
 
             const modelName = selectedModel.name.replace(/^models\//, '');
@@ -588,13 +643,22 @@
         if(!key) { alert("設定ボタンからAPIキーを保存してください"); return; }
         if(!model) { alert("設定画面を開き、[保存] を押してください。"); openSettings(); return; }
 
+        // リクエスト実行
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
             method: 'POST', headers: {'Content-Type':'application/json'},
             body: JSON.stringify({ contents: [{ parts }] })
         });
         const data = await res.json();
         
-        if(data.error) throw new Error(data.error.message);
+        // エラーハンドリング: モデルが見つからない場合は再設定を促す
+        if(data.error) {
+            if(data.error.code === 404 || data.error.message.includes('not found')) {
+                alert("保存されたAIモデルが無効になっています。設定画面を開き、もう一度「保存」ボタンを押してください。");
+                openSettings();
+                throw new Error("モデル再設定が必要です");
+            }
+            throw new Error(data.error.message);
+        }
         
         if (!data.candidates || data.candidates.length === 0) throw new Error("AI応答なし");
         const candidate = data.candidates[0];
